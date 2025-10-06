@@ -1,0 +1,393 @@
+version: '3.9'
+
+services:
+  # ===========================
+  # DATABASES & STORAGE
+  # ===========================
+  
+  mongodb:
+    image: mongo:7.0
+    container_name: etincel-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: etincel
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - etincel-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: etincel-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - etincel-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: etincel-elasticsearch
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - etincel-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: etincel-minio
+    restart: always
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - etincel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================
+  # API GATEWAY
+  # ===========================
+
+  nginx:
+    image: nginx:alpine
+    container_name: etincel-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - auth-service
+      - profile-service
+      - match-service
+      - chat-service
+      - payment-service
+    networks:
+      - etincel-network
+
+  # ===========================
+  # MICROSERVICES
+  # ===========================
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: etincel-auth-service
+    restart: always
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env.production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - etincel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  profile-service:
+    build:
+      context: ./services/profile-service
+      dockerfile: Dockerfile
+    container_name: etincel-profile-service
+    restart: always
+    ports:
+      - "3002:3002"
+    env_file:
+      - .env.production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - etincel-network
+
+  match-service:
+    build:
+      context: ./services/match-service
+      dockerfile: Dockerfile
+    container_name: etincel-match-service
+    restart: always
+    ports:
+      - "3003:3003"
+    env_file:
+      - .env.production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - etincel-network
+
+  chat-service:
+    build:
+      context: ./services/chat-service
+      dockerfile: Dockerfile
+    container_name: etincel-chat-service
+    restart: always
+    ports:
+      - "3004:3004"
+    env_file:
+      - .env.production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - etincel-network
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: etincel-payment-service
+    restart: always
+    ports:
+      - "3005:3005"
+    env_file:
+      - .env.production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - etincel-network
+
+  location-service:
+    build:
+      context: ./services/location-service
+      dockerfile: Dockerfile
+    container_name: etincel-location-service
+    restart: always
+    ports:
+      - "9000:9000"
+    env_file:
+      - .env.production
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - etincel-network
+
+  ai-service:
+    build:
+      context: ./services/ai-service
+      dockerfile: Dockerfile
+    container_name: etincel-ai-service
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.production
+    volumes:
+      - ./ai-engine/models:/app/models
+    networks:
+      - etincel-network
+
+  blockchain-service:
+    build:
+      context: ./services/blockchain-service
+      dockerfile: Dockerfile
+    container_name: etincel-blockchain-service
+    restart: always
+    ports:
+      - "3010:3010"
+    env_file:
+      - .env.production
+    networks:
+      - etincel-network
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: etincel-notification-service
+    restart: always
+    ports:
+      - "3006:3006"
+    env_file:
+      - .env.production
+    networks:
+      - etincel-network
+
+  media-service:
+    build:
+      context: ./services/media-service
+      dockerfile: Dockerfile
+    container_name: etincel-media-service
+    restart: always
+    ports:
+      - "3007:3007"
+    env_file:
+      - .env.production
+    depends_on:
+      - minio
+    networks:
+      - etincel-network
+
+  analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: etincel-analytics-service
+    restart: always
+    ports:
+      - "3008:3008"
+    env_file:
+      - .env.production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - etincel-network
+
+  webrtc-service:
+    build:
+      context: ./services/webrtc-service
+      dockerfile: Dockerfile
+    container_name: etincel-webrtc-service
+    restart: always
+    ports:
+      - "3009:3009"
+    env_file:
+      - .env.production
+    networks:
+      - etincel-network
+
+  # ===========================
+  # FRONTEND APPS
+  # ===========================
+
+  mobile-web:
+    build:
+      context: ./client/mobile-web
+      dockerfile: Dockerfile
+    container_name: etincel-mobile-web
+    restart: always
+    ports:
+      - "5173:80"
+    networks:
+      - etincel-network
+
+  desktop-web:
+    build:
+      context: ./client/desktop-web
+      dockerfile: Dockerfile
+    container_name: etincel-desktop-web
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.production
+    networks:
+      - etincel-network
+
+  admin-dashboard:
+    build:
+      context: ./admin-dashboard
+      dockerfile: Dockerfile
+    container_name: etincel-admin-dashboard
+    restart: always
+    ports:
+      - "3100:80"
+    networks:
+      - etincel-network
+
+  # ===========================
+  # MONITORING
+  # ===========================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: etincel-prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - etincel-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: etincel-grafana
+    restart: always
+    ports:
+      - "3300:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    networks:
+      - etincel-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  elasticsearch_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  etincel-network:
+    driver: bridge
